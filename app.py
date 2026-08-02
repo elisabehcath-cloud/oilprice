@@ -55,7 +55,6 @@ if submit_button:
     
     st.success(f"✅ 成功記錄！本次總金額為：**{total_price}** 元")
 
----
 
 # --- 顯示歷史紀錄 ---
 st.subheader("📜 歷史加油紀錄")
