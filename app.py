@@ -10,7 +10,7 @@ st.title("⛽ 車隊加油紀錄系統")
 
 # ---------------------------------------------------------
 # 請在此處貼上你部署的 Google Apps Script Web App 網址
-GSHEET_WEB_APP_URL = "填入你的_APPS_SCRIPT_WEB_APP_網址"
+GSHEET_WEB_APP_URL = "https://docs.google.com/forms/d/1zqVK5qQ_2d6lnoywerYCy6DSndMUhQkVqmzd2FunvZ8/edit"
 # ---------------------------------------------------------
 
 # 選單設定（可自由新增或修改）
