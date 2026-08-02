@@ -1,6 +1,8 @@
 streamlit
 pandas
-sqlite3
-easyocr
-opencv-python-headless
+openpyxl
 Pillow
+opencv-python-headless
+--find-links https://download.pytorch.org/whl/cpu/torch_stable.html
+torch
+easyocr
