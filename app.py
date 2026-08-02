@@ -2,21 +2,21 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
-import io
+from PIL import Image
+import easyocr
+import numpy as np
+import re
 
-# 頁面基本設定
-st.set_page_config(page_title="加油紀錄系統 (SQLite)", layout="centered")
+# 頁面標題設定
+st.set_page_config(page_title="加油紀錄與發票辨識系統", layout="centered")
 
-# --- 資料庫初始化與處理函式 ---
+# --- SQLite 資料庫設定 ---
 DB_FILE = "fuel_log.db"
 
 def get_connection():
-    """建立 SQLite 資料庫連線"""
-    conn = sqlite3.connect(DB_FILE)
-    return conn
+    return sqlite3.connect(DB_FILE)
 
 def init_db():
-    """初始化資料庫表單"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
@@ -25,6 +25,8 @@ def init_db():
             time TEXT,
             driver TEXT,
             plate TEXT,
+            inv_num TEXT,
+            ubn TEXT,
             price REAL,
             liters REAL,
             total INTEGER,
@@ -34,156 +36,160 @@ def init_db():
     conn.commit()
     conn.close()
 
-def load_data():
-    """讀取 SQLite 中的所有資料"""
-    conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM fuel_records ORDER BY id DESC", conn)
-    conn.close()
-    if not df.empty:
-        # 將 status (0/1) 轉為布林值 (False/True) 方便 Streamlit 核取方塊顯示
-        df["status"] = df["status"].astype(bool)
-    return df
-
-# 啟動時自動初始化資料庫
 init_db()
 
-# --- 介面元件選單 ---
+# --- 初始化 EasyOCR 辨識器 (快取載入以提升速度) ---
+@st.cache_resource
+def load_ocr():
+    # 支援繁體中文 (zh_tra) 與英文 (en)
+    return easyocr.Reader(['zh_tra', 'en'])
+
+reader = load_ocr()
+
+# 下拉選單預設值
 DRIVERS = ["張小明", "陳大華", "李阿姨", "王司機"]
 PLATES = ["ABC-1234", "DEF-5678", "GHI-9012", "JKL-3456"]
 
-st.title("⛽ 車隊加油紀錄系統 (SQLite 版)")
+st.title("⛽ 車隊加油與發票辨識系統")
 
-# --- 側邊欄：資料備份與匯入/匯出 ---
-st.sidebar.header("📥 🗄️ 資料備份與管理")
+# --- 1. 拍照與 OCR 辨識區塊 ---
+st.subheader("📷 拍照辨識統一發票")
+img_file = st.camera_input("請對準發票進行拍照")
 
-# 1. 匯出資料
-st.sidebar.subheader("匯出資料")
-df_current = load_data()
+# 初始化 Session State 暫存辨識出的資料
+if "ocr_data" not in st.session_state:
+    st.session_state.ocr_data = {
+        "inv_num": "",
+        "ubn": "",
+        "price": 30.0,
+        "liters": 20.0,
+        "total": 0
+    }
 
-if not df_current.empty:
-    # 匯出 CSV
-    csv_data = df_current.to_csv(index=False).encode('utf-8-sig')
-    st.sidebar.download_button(
-        label="📄 匯出成 CSV 檔案",
-        data=csv_data,
-        file_name=f"fuel_records_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv"
-    )
+if img_file is not None:
+    # 讀取相片
+    image = Image.open(img_file)
+    img_array = np.array(image)
     
-    # 匯出 Excel
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_current.to_excel(writer, index=False, sheet_name='加油紀錄')
-    st.sidebar.download_button(
-        label="📊 匯出成 Excel 檔案",
-        data=buffer.getvalue(),
-        file_name=f"fuel_records_{datetime.now().strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-else:
-    st.sidebar.info("目前無資料可匯出")
+    with st.spinner("🔍 正在解析發票資料中..."):
+        # 進行文字辨識
+        results = reader.readtext(img_array)
+        extracted_text = " ".join([res[1] for res in results])
+        
+        # 顯示辨識出來的原始文字（可供除錯參考）
+        with st.expander("檢視 OCR 提取到的原始文字"):
+            st.write(extracted_text)
+            
+        # 1. 辨識發票號碼 (例: AB-12345678)
+        inv_match = re.search(r'[A-Za-z]{2}[-_\s]?\d{8}', extracted_text)
+        if inv_match:
+            st.session_state.ocr_data["inv_num"] = inv_match.group(0).replace(" ", "").upper()
+            
+        # 2. 辨識統一編號 (8位數字)
+        ubn_match = re.search(r'統編[：:\s]*(\d{8})', extracted_text)
+        if ubn_match:
+            st.session_state.ocr_data["ubn"] = ubn_match.group(1)
 
-st.sidebar.markdown("---")
+        # 3. 辨識總價 (包含關鍵字如 總計、金額、元)
+        total_match = re.search(r'(?:總計|合計|金額)[：:\s]*\$?(\d+)', extracted_text)
+        if total_match:
+            st.session_state.ocr_data["total"] = int(total_match.group(1))
 
-# 2. 匯入資料
-st.sidebar.subheader("匯入資料 (CSV)")
-uploaded_file = st.sidebar.file_uploader("選擇備份的 CSV 檔", type=["csv"])
+        # 4. 辨識單價與公升數
+        price_match = re.search(r'單價[：:\s]*(\d+\.?\d*)', extracted_text)
+        if price_match:
+            st.session_state.ocr_data["price"] = float(price_match.group(1))
 
-if uploaded_file is not None:
-    if st.sidebar.button("確認匯入"):
-        try:
-            import_df = pd.read_csv(uploaded_file)
-            # 檢查必要的欄位
-            required_cols = {"time", "driver", "plate", "price", "liters", "total", "status"}
-            if required_cols.issubset(set(import_df.columns)):
-                conn = get_connection()
-                # 排除 id 欄位，讓資料庫自動遞增生成
-                cols_to_import = ["time", "driver", "plate", "price", "liters", "total", "status"]
-                import_df[cols_to_import].to_sql("fuel_records", conn, if_exists="append", index=False)
-                conn.close()
-                st.sidebar.success("🎉 資料成功匯入資料庫！")
-                st.rerun()
-            else:
-                st.sidebar.error("匯入失敗：CSV 格式無效，欄位不符合標準。")
-        except Exception as e:
-            st.sidebar.error(f"匯入錯誤：{e}")
+        liters_match = re.search(r'(?:數量|公升)[：:\s]*(\d+\.?\d*)', extracted_text)
+        if liters_match:
+            st.session_state.ocr_data["liters"] = float(liters_match.group(1))
+
+    st.success("✅ 發票辨識完成！請在下方確認或微調資料後送出。")
 
 
-# --- 主畫面：新增加油紀錄 ---
-st.subheader("➕ 新增加油紀錄")
+# --- 2. 手動輸入/確認表單 ---
+st.markdown("---")
+st.subheader("📝 確認加油與發票內容")
 
-with st.form("fuel_form", clear_on_submit=True):
+with st.form("fuel_form", clear_on_submit=False):
     col1, col2 = st.columns(2)
     with col1:
-        driver = st.selectbox("👤 選擇駕駛人", DRIVERS)
-        price_per_liter = st.number_input("💵 油價單價 (元/L)", min_value=0.0, value=30.0, step=0.1)
+        driver = st.selectbox("👤 駕駛人", DRIVERS)
+        inv_num = st.text_input("📄 發票號碼", value=st.session_state.ocr_data["inv_num"])
+        price_per_liter = st.number_input("💵 油價單價 (元/L)", min_value=0.0, value=st.session_state.ocr_data["price"], step=0.1)
     
     with col2:
-        plate = st.selectbox("🚗 選擇車牌", PLATES)
-        liters = st.number_input("⛽ 加油公升數 (L)", min_value=0.0, value=20.0, step=0.5)
+        plate = st.selectbox("🚗 車牌號碼", PLATES)
+        ubn = st.text_input("🏢 買方統一編號 (統編)", value=st.session_state.ocr_data["ubn"])
+        liters = st.number_input("⛽ 加油公升數 (L)", min_value=0.0, value=st.session_state.ocr_data["liters"], step=0.5)
 
-    submit_button = st.form_submit_button("新增紀錄並存入 SQLite")
+    # 試算總價 (若 OCR 未辨識出總價則自動計算)
+    calc_total = round(price_per_liter * liters)
+    default_total = st.session_state.ocr_data["total"] if st.session_state.ocr_data["total"] > 0 else calc_total
+    total_price = st.number_input("💰 總價 (元)", min_value=0, value=default_total)
+
+    submit_button = st.form_submit_button("💾 儲存資料存入 SQLite")
 
 if submit_button:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    total_price = round(price_per_liter * liters)
-
-    # 存入 SQLite 資料庫
+    
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO fuel_records (time, driver, plate, price, liters, total, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (now_str, driver, plate, price_per_liter, liters, total_price, 0))
+        INSERT INTO fuel_records (time, driver, plate, inv_num, ubn, price, liters, total, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (now_str, driver, plate, inv_num, ubn, price_per_liter, liters, total_price, 0))
     conn.commit()
     conn.close()
 
-    st.success(f"✅ 已存入 SQLite！總金額為：**{total_price}** 元")
+    st.success(f"🎉 成功寫入資料庫！本次加油總金額：**{total_price}** 元")
+    
+    # 清除暫存檔並重置
+    st.session_state.ocr_data = {"inv_num": "", "ubn": "", "price": 30.0, "liters": 20.0, "total": 0}
     st.rerun()
 
-# --- 主畫面：歷史紀錄與編輯 ---
-st.markdown("---")
-st.subheader("📜 歷史加油紀錄管理")
 
-df_logs = load_data()
+# --- 3. 歷史紀錄管理 ---
+st.markdown("---")
+st.subheader("📜 歷史加油與發票紀錄")
+
+conn = get_connection()
+df_logs = pd.read_sql_query("SELECT * FROM fuel_records ORDER BY id DESC", conn)
+conn.close()
 
 if not df_logs.empty:
-    # 重命名欄位以提升介面可讀性
+    df_logs["status"] = df_logs["status"].astype(bool)
+    
     column_mapping = {
         "id": "ID",
-        "time": "加油時間",
+        "time": "時間",
         "driver": "駕駛人",
         "plate": "車牌",
-        "price": "單價 (元/L)",
-        "liters": "公升數 (L)",
-        "total": "總價 (元)",
+        "inv_num": "發票號碼",
+        "ubn": "買方統編",
+        "price": "單價",
+        "liters": "公升數",
+        "total": "總價",
         "status": "已核銷"
     }
     
     display_df = df_logs.rename(columns=column_mapping)
 
-    # 資料編輯表格
     edited_df = st.data_editor(
         display_df,
         column_config={
-            "已核銷": st.column_config.CheckboxColumn(
-                "已核銷",
-                help="勾選代表審核/核銷完成",
-                default=False,
-            )
+            "已核銷": st.column_config.CheckboxColumn("已核銷", default=False)
         },
-        disabled=["ID", "加油時間", "駕駛人", "車牌", "單價 (元/L)", "公升數 (L)", "總價 (元)"],
-        num_rows="dynamic", # 允許刪除列
+        disabled=["ID", "時間", "駕駛人", "車牌", "發票號碼", "買方統編", "單價", "公升數", "總價"],
+        num_rows="dynamic",
         use_container_width=True,
         key="sqlite_editor"
     )
 
-    # 按鈕儲存變更 (包含勾選狀態與刪除項目)
-    if st.button("💾 儲存表格變更 (核銷狀態 / 刪除列)"):
+    if st.button("💾 儲存核銷變更與刪除項目"):
         conn = get_connection()
         cursor = conn.cursor()
         
-        # 1. 處理刪除：找出被刪除的 ID 並從資料庫移除
         current_ids = set(edited_df["ID"].tolist())
         original_ids = set(df_logs["id"].tolist())
         deleted_ids = original_ids - current_ids
@@ -191,7 +197,6 @@ if not df_logs.empty:
         for del_id in deleted_ids:
             cursor.execute("DELETE FROM fuel_records WHERE id = ?", (del_id,))
 
-        # 2. 處理勾選狀態更新
         for index, row in edited_df.iterrows():
             record_id = int(row["ID"])
             status_val = 1 if row["已核銷"] else 0
@@ -199,14 +204,7 @@ if not df_logs.empty:
 
         conn.commit()
         conn.close()
-        st.success("✅ 資料庫變更已成功儲存！")
+        st.success("✅ 資料庫變更已更新！")
         st.rerun()
-
-    # 累積數據統計
-    st.markdown("### 📈 累積統計")
-    col_stat1, col_stat2 = st.columns(2)
-    col_stat1.metric("累積總支出", f"{df_logs['total'].sum():,} 元")
-    col_stat2.metric("累積總加油量", f"{df_logs['liters'].sum():.1f} L")
-
 else:
-    st.info("目前 SQLite 資料庫中沒有紀錄。")
+    st.info("目前尚無資料。")
