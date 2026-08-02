@@ -39,10 +39,10 @@ def init_db():
 init_db()
 
 # --- 初始化 EasyOCR 辨識器 (快取載入以提升速度) ---
+
 @st.cache_resource
 def load_ocr():
-    # 支援繁體中文 (zh_tra) 與英文 (en)
-    return easyocr.Reader(['zh_tra', 'en'])
+    return easyocr.Reader(['ch_tra', 'en']))
 
 reader = load_ocr()
 
