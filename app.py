@@ -42,7 +42,7 @@ init_db()
 
 @st.cache_resource
 def load_ocr():
-    return easyocr.Reader(['ch_tra', 'en']))
+    return easyocr.Reader(['ch_tra', 'en'])
 
 reader = load_ocr()
 
